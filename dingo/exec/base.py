@@ -1,22 +1,20 @@
 import inspect
-from abc import ABC, abstractmethod
-from functools import wraps
-from typing import Any, Dict, List, Protocol, Type, Union
+from typing import Any, Dict, Protocol, Type
 
-from dingo.io import MetaData, SummaryModel
+from dingo.io import SummaryModel
 
 
 class ExecProto(Protocol):
-    def load_data(self, path: str, data_type: str) -> List[MetaData]:
+    def load_data(self) -> Any:
         ...
 
-    def execute(self) -> List[SummaryModel]:
+    def execute(self) -> SummaryModel:
         ...
 
-    def evaluate(self) -> SummaryModel:
+    def evaluate(self):
         ...
 
-    def summarize(self, inputs: MetaData) -> SummaryModel:
+    def summarize(self, summary: SummaryModel) -> SummaryModel:
         ...
 
 
@@ -25,7 +23,6 @@ class Executor:
 
     @classmethod
     def register(cls, exec_name: str):
-
         def decorator(root_exec):
             cls.exec_map[exec_name] = root_exec
 

@@ -10,7 +10,7 @@ from typing import Generator, List, Optional
 from dingo.config import GlobalConfig
 from dingo.data import Dataset, DataSource, dataset_map, datasource_map
 from dingo.exec.base import ExecProto, Executor
-from dingo.io import InputArgs, MetaData, ResultInfo, SummaryModel
+from dingo.io import Data, InputArgs, ResultInfo, SummaryModel
 from dingo.model import Model
 from dingo.model.llm.base import BaseLLM
 from dingo.model.modelres import ModelRes
@@ -20,24 +20,21 @@ from dingo.utils import log
 from tqdm import tqdm
 
 
-@Executor.register('local')
+@Executor.register("local")
 class LocalExecutor(ExecProto):
-
     def __init__(self, input_args: InputArgs):
         self.input_args: InputArgs = input_args
         self.llm: Optional[BaseLLM] = None
         self.summary: SummaryModel = SummaryModel()
-        self.bad_info_list: List[ResultInfo] = []
-        self.good_info_list: List[ResultInfo] = []
 
-    def load_data(self) -> Generator[MetaData, None, None]:
+    def load_data(self) -> Generator[Data, None, None]:
         """
         Reads data from given path.
 
         **Run in executor.**
 
         Returns:
-            Generator[MetaData]
+            Generator[Data]
         """
         datasource_cls = datasource_map[self.input_args.dataset]
         dataset_cls = dataset_map[self.input_args.dataset]
@@ -46,12 +43,14 @@ class LocalExecutor(ExecProto):
         dataset: Dataset = dataset_cls(source=datasource)
         return dataset.get_data()
 
-    def execute(self) -> List[SummaryModel]:
+    def execute(self) -> SummaryModel:
         log.setLevel(self.input_args.log_level)
-        create_time = time.strftime('%Y%m%d_%H%M%S', time.localtime())
+        create_time = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         Model.apply_config(self.input_args.custom_config, self.input_args.eval_group)
         input_path = self.input_args.input_path
-        output_path = os.path.join(self.input_args.output_path, create_time + '_' + str(uuid.uuid1())[:8])
+        output_path = os.path.join(
+            self.input_args.output_path, create_time + "_" + str(uuid.uuid1())[:8]
+        )
 
         log.debug(str(self.input_args.eval_group))
         for group_name in [self.input_args.eval_group]:
@@ -67,22 +66,30 @@ class LocalExecutor(ExecProto):
                 task_name=self.input_args.task_name,
                 eval_group=group_name,
                 input_path=input_path,
-                output_path=output_path if self.input_args.save_data else '',
+                output_path=output_path if self.input_args.save_data else "",
                 create_time=create_time,
-                score=0,
-                num_good=0,
-                num_bad=0,
-                total=0,
-                type_ratio={},
-                name_ratio={}
             )
             self.evaluate()
             self.summary = self.summarize(self.summary)
-            self.summary.finish_time = time.strftime('%Y%m%d_%H%M%S', time.localtime())
-            if self.input_args.save_data:
-                self.save_data(output_path, self.input_args, self.bad_info_list, self.good_info_list, self.summary)
+            self.write_summary(self.summary.output_path, self.input_args, self.summary)
 
-        return [self.summary]
+        return self.summary
+
+    def merge_result_info(self, existing_list: List[ResultInfo], new_item: ResultInfo) -> List[ResultInfo]:
+        existing_item = next((item for item in existing_list if item.data_id == new_item.data_id), None)
+
+        if existing_item:
+            existing_item.error_status = existing_item.error_status or new_item.error_status
+
+            existing_item.type_list = list(set(existing_item.type_list + new_item.type_list))
+            existing_item.name_list = list(set(existing_item.name_list + new_item.name_list))
+            existing_item.reason_list = list(set(existing_item.reason_list + new_item.reason_list))
+
+            existing_item.raw_data = new_item.raw_data
+        else:
+            existing_list.append(new_item)
+
+        return existing_list
 
     def evaluate(self):
         """
@@ -91,76 +98,83 @@ class LocalExecutor(ExecProto):
             group (Any): _description_
             group_type (str): _description_
         """
-        with concurrent.futures.ThreadPoolExecutor(max_workers=self.input_args.max_workers) as thread_executor, \
-             concurrent.futures.ProcessPoolExecutor(max_workers=self.input_args.max_workers) as process_executor:
+        with concurrent.futures.ThreadPoolExecutor(
+            max_workers=self.input_args.max_workers
+        ) as thread_executor, concurrent.futures.ProcessPoolExecutor(
+            max_workers=self.input_args.max_workers
+        ) as process_executor:
             data_iter = self.load_data()
-            data_iter = itertools.islice(data_iter, self.input_args.start_index, self.input_args.end_index if self.input_args.end_index >= 0 else None )
-            pbar = tqdm(total=None, unit='items')
+            data_iter = itertools.islice(
+                data_iter,
+                self.input_args.start_index,
+                self.input_args.end_index if self.input_args.end_index >= 0 else None,
+            )
+            pbar = tqdm(total=None, unit="items")
 
-            def process_batch(batch: List):
-                save_flag = False
-
-                futures=[]
-                for group_type, group in Model.get_group(self.input_args.eval_group).items():
-                    if group_type == 'rule':
-                        futures += [process_executor.submit(self.evaluate_single_data, group_type, group, data) for data in batch]
-                    elif group_type == 'prompt':
-                        futures += [thread_executor.submit(self.evaluate_single_data, group_type, group, data) for data in batch]
-                    else:
-                        raise RuntimeError(f'Unsupported group type: {group_type}')
-
-                for future in concurrent.futures.as_completed(futures):
-                    result_info = future.result()
-                    # calculate summary ratio
-                    if result_info.error_status:
-                        self.bad_info_list.append(result_info)
-                        self.summary.num_bad += 1
-                        for t in result_info.type_list:
-                            if t not in self.summary.type_ratio:
-                                self.summary.type_ratio[t] = 1
-                            else:
-                                self.summary.type_ratio[t] += 1
-                        for n in result_info.name_list:
-                            if n not in self.summary.name_ratio:
-                                self.summary.name_ratio[n] = 1
-                            else:
-                                self.summary.name_ratio[n] += 1
-                    else:
-                        if self.input_args.save_correct:
-                            self.good_info_list.append(result_info)
-                            for t in result_info.type_list:
-                                if t not in self.summary.type_ratio:
-                                    self.summary.type_ratio[t] = 1
-                                else:
-                                    self.summary.type_ratio[t] += 1
-                            for n in result_info.name_list:
-                                if n not in self.summary.name_ratio:
-                                    self.summary.name_ratio[n] = 1
-                                else:
-                                    self.summary.name_ratio[n] += 1
-                    self.summary.total += 1
-                    if self.summary.total % self.input_args.interval_size == 0:
-                        save_flag = True
-                    pbar.update()
-                # save data in file
-                if self.input_args.save_data:
-                    if save_flag:
-                        tmp_summary = self.summarize(self.summary)
-                        tmp_summary.finish_time = time.strftime('%Y%m%d_%H%M%S', time.localtime())
-                        tmp_output_path = self.summary.output_path
-                        self.save_data(tmp_output_path, self.input_args, self.bad_info_list, self.good_info_list, tmp_summary)
-                        self.bad_info_list = []
-                        self.good_info_list = []
             while True:
                 batch = list(itertools.islice(data_iter, self.input_args.batch_size))
                 if not batch:
                     break
-                process_batch(batch)
 
-        log.debug('[Summary]: ' + str(self.summary))
+                futures = []
+                futures_results = []
+                for data in batch:
+                    for group_type, group in Model.get_group(
+                            self.input_args.eval_group
+                    ).items():
+                        if group_type == "rule":
+                            if os.environ.get("LOCAL_DEPLOYMENT_MODE") == "true":
+                                futures += [
+                                    thread_executor.submit(
+                                        self.evaluate_single_data, group_type, group, data
+                                    )
+                                ]
+                            else:
+                                futures += [
+                                    process_executor.submit(
+                                        self.evaluate_single_data, group_type, group, data
+                                    )
+                                ]
+                        elif group_type == "prompt":
+                            futures += [
+                                thread_executor.submit(
+                                    self.evaluate_single_data, group_type, group, data
+                                )
+                            ]
+                        else:
+                            raise RuntimeError(f"Unsupported group type: {group_type}")
 
-    def evaluate_single_data(self, group_type, group, data: MetaData):
-        result_info = ResultInfo(data_id=data.data_id, prompt=data.prompt, content=data.content)
+                for future in concurrent.futures.as_completed(futures):
+                    result_info = future.result()
+                    futures_results = self.merge_result_info(futures_results, result_info)
+
+                for result_info in futures_results:
+                    for t in result_info.type_list:
+                        self.summary.type_ratio[t] += 1
+                    for n in result_info.name_list:
+                        self.summary.name_ratio[n] += 1
+                    if result_info.error_status:
+                        self.summary.num_bad += 1
+                    else:
+                        self.summary.num_good += 1
+                    self.summary.total += 1
+
+                    self.write_single_data(
+                        self.summary.output_path, self.input_args, result_info
+                    )
+                    pbar.update()
+                self.write_summary(
+                    self.summary.output_path,
+                    self.input_args,
+                    self.summarize(self.summary),
+                )
+
+        log.debug("[Summary]: " + str(self.summary))
+
+    def evaluate_single_data(self, group_type, group, data: Data):
+        result_info = ResultInfo(
+            data_id=data.data_id, prompt=data.prompt, content=data.content
+        )
         if self.input_args.save_raw:
             result_info.raw_data = data.raw_data
         bad_type_list = []
@@ -170,12 +184,12 @@ class LocalExecutor(ExecProto):
         bad_reason_list = []
         good_reason_list = []
         # for group_type, group in Model.get_group(group_name).items():
-        if group_type == 'rule':
+        if group_type == "rule":
             r_i = self.evaluate_rule(group, data)
-        elif group_type == 'prompt':
+        elif group_type == "prompt":
             r_i = self.evaluate_prompt(group, data)
         else:
-            raise RuntimeError(f'Unsupported group type: {group_type}')
+            raise RuntimeError(f"Unsupported group type: {group_type}")
         if r_i.error_status:
             result_info.error_status = True
             bad_type_list = bad_type_list + r_i.type_list
@@ -203,7 +217,7 @@ class LocalExecutor(ExecProto):
                     result_info.reason_list.append(reason)
         return result_info
 
-    def evaluate_rule(self, group: List[BaseRule], d: MetaData) -> ResultInfo:
+    def evaluate_rule(self, group: List[BaseRule], d: Data) -> ResultInfo:
         result_info = ResultInfo(data_id=d.data_id, prompt=d.prompt, content=d.content)
         log.debug("[RuleGroup]: " + str(group))
         bad_type_list = []
@@ -219,11 +233,11 @@ class LocalExecutor(ExecProto):
             if tmp.error_status:
                 result_info.error_status = True
                 bad_type_list.append(tmp.type)
-                bad_name_list.append(tmp.type + '-' + tmp.name)
+                bad_name_list.append(tmp.type + "-" + tmp.name)
                 bad_reason_list.extend(tmp.reason)
             else:
                 good_type_list.append(tmp.type)
-                good_name_list.append(tmp.type + '-' + tmp.name)
+                good_name_list.append(tmp.type + "-" + tmp.name)
                 good_reason_list.extend(tmp.reason)
         if result_info.error_status:
             result_info.type_list = list(set(bad_type_list))
@@ -235,7 +249,7 @@ class LocalExecutor(ExecProto):
             result_info.reason_list = good_reason_list
         return result_info
 
-    def evaluate_prompt(self, group: List[BasePrompt], d: MetaData) -> ResultInfo:
+    def evaluate_prompt(self, group: List[BasePrompt], d: Data) -> ResultInfo:
         result_info = ResultInfo(data_id=d.data_id, prompt=d.prompt, content=d.content)
         log.debug("[PromptGroup]: " + str(group))
         bad_type_list = []
@@ -247,16 +261,16 @@ class LocalExecutor(ExecProto):
         for p in group:
             self.llm.set_prompt(p)
             # execute prompt
-            tmp: ModelRes = self.llm.call_api(d)
+            tmp: ModelRes = self.llm.eval(d)
             # analyze result
             if tmp.error_status:
                 result_info.error_status = True
                 bad_type_list.append(tmp.type)
-                bad_name_list.append(tmp.type + '-' + tmp.name)
+                bad_name_list.append(tmp.type + "-" + tmp.name)
                 bad_reason_list.extend(tmp.reason)
             else:
                 good_type_list.append(tmp.type)
-                good_name_list.append(tmp.type + '-' + tmp.name)
+                good_name_list.append(tmp.type + "-" + tmp.name)
                 good_reason_list.extend(tmp.reason)
         if result_info.error_status:
             result_info.type_list = list(set(bad_type_list))
@@ -272,62 +286,84 @@ class LocalExecutor(ExecProto):
         new_summary = copy.deepcopy(summary)
         if new_summary.total == 0:
             return new_summary
-        new_summary.num_good = new_summary.total - new_summary.num_bad
         new_summary.score = round(new_summary.num_good / new_summary.total * 100, 2)
         for t in new_summary.type_ratio:
-            new_summary.type_ratio[t] = round(new_summary.type_ratio[t] / new_summary.total, 6)
+            new_summary.type_ratio[t] = round(
+                new_summary.type_ratio[t] / new_summary.total, 6
+            )
         for n in new_summary.name_ratio:
-            new_summary.name_ratio[n] = round(new_summary.name_ratio[n] / new_summary.total, 6)
+            new_summary.name_ratio[n] = round(
+                new_summary.name_ratio[n] / new_summary.total, 6
+            )
         new_summary.type_ratio = dict(sorted(new_summary.type_ratio.items()))
         new_summary.name_ratio = dict(sorted(new_summary.name_ratio.items()))
+
+        new_summary.finish_time = time.strftime("%Y%m%d_%H%M%S", time.localtime())
         return new_summary
+
+    def write_single_data(
+        self, path: str, input_args: InputArgs, result_info: ResultInfo
+    ):
+        if not input_args.save_data:
+            return
+
+        if not input_args.save_correct and not result_info.error_status:
+            return
+
+        for new_name in result_info.name_list:
+            t = str(new_name).split("-")[0]
+            n = str(new_name).split("-")[1]
+            p_t = os.path.join(path, t)
+            if not os.path.exists(p_t):
+                os.makedirs(p_t)
+            f_n = os.path.join(path, t, n) + ".jsonl"
+            with open(f_n, "a", encoding="utf-8") as f:
+                if input_args.save_raw:
+                    str_json = json.dumps(result_info.to_raw_dict(), ensure_ascii=False)
+                else:
+                    str_json = json.dumps(result_info.to_dict(), ensure_ascii=False)
+                f.write(str_json + "\n")
+
+    def write_summary(self, path: str, input_args: InputArgs, summary: SummaryModel):
+        if not input_args.save_data:
+            return
+        with open(path + "/summary.json", "w", encoding="utf-8") as f:
+            json.dump(summary.to_dict(), f, indent=4, ensure_ascii=False)
 
     def get_summary(self):
         return self.summary
 
+    def get_info_list(self, high_quality: bool) -> list:
+        info_list = []
+
+        save_raw = self.input_args.save_raw
+        output_path = self.summary.output_path
+        if not os.path.isdir(output_path):
+            raise ValueError(f"output_path not exists: {output_path}")
+
+        for root, dirs, files in os.walk(output_path):
+            for file in files:
+                file_path = os.path.join(root, file)
+                file_name = file
+                if file_name == "summary.json":
+                    continue
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    for line in f:
+                        data = json.loads(line.strip())
+
+                        if save_raw:
+                            error_status = data['dingo_result']['error_status']
+                        else:
+                            error_status = data['error_status']
+                        if high_quality and not error_status:
+                            info_list.append(data)
+                        if not high_quality and error_status:
+                            info_list.append(data)
+
+        return info_list
+
     def get_bad_info_list(self):
-        return self.bad_info_list
+        return self.get_info_list(high_quality=False)
 
     def get_good_info_list(self):
-        return self.good_info_list
-
-    def save_data(
-            self,
-            path: str,
-            input_args: InputArgs,
-            bad_info_list: List[ResultInfo],
-            good_info_list: List[ResultInfo],
-            summary: SummaryModel,
-    ):
-        for result_info in bad_info_list:
-            for new_name in result_info.name_list:
-                t = str(new_name).split('-')[0]
-                n = str(new_name).split('-')[1]
-                p_t = os.path.join(path, t)
-                if not os.path.exists(p_t):
-                    os.makedirs(p_t)
-                f_n = os.path.join(path, t, n) + ".jsonl"
-                with open(f_n, 'a', encoding='utf-8') as f:
-                    if input_args.save_raw:
-                        str_json = json.dumps(result_info.to_raw_dict(), ensure_ascii=False)
-                    else:
-                        str_json = json.dumps(result_info.to_dict(), ensure_ascii=False)
-                    f.write(str_json + '\n')
-        if input_args.save_correct:
-            for result_info in good_info_list:
-                for new_name in result_info.name_list:
-                    t = str(new_name).split('-')[0]
-                    n = str(new_name).split('-')[1]
-                    p_t = os.path.join(path, t)
-                    if not os.path.exists(p_t):
-                        os.makedirs(p_t)
-                    f_n = os.path.join(path, t, n) + ".jsonl"
-                    with open(f_n, 'a', encoding='utf-8') as f:
-                        if input_args.save_raw:
-                            str_json = json.dumps(result_info.to_raw_dict(), ensure_ascii=False)
-                        else:
-                            str_json = json.dumps(result_info.to_dict(), ensure_ascii=False)
-                        f.write(str_json + '\n')
-
-        with open(path + '/summary.json', 'w', encoding='utf-8') as f:
-            json.dump(summary.to_dict(), f, indent=4, ensure_ascii=False)
+        return self.get_info_list(high_quality=True)

@@ -14,21 +14,20 @@ def image_relevant():
         "column_prompt": "url_1",
         "column_content": "url_2",
         "custom_config": {
-            "prompt_list": ["PromptImageRelevance"],
-            "llm_config":
-                {
-                    "detect_image_relevant":
-                        {
-                            "key": "",
-                            "api_url": "",
-                        }
+            "prompt_list": ["PromptImageRelevant"],
+            "llm_config": {
+                "VLMImageRelevant": {
+                    "key": "",
+                    "api_url": "",
                 }
+            }
         }
     }
     input_args = InputArgs(**input_data)
     executor = Executor.exec_map["local"](input_args)
     result = executor.execute()
     print(result)
+
 
 if __name__ == '__main__':
     image_relevant()

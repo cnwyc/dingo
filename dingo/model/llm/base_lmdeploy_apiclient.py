@@ -3,7 +3,7 @@ import time
 from typing import List
 
 from dingo.config.config import DynamicLLMConfig
-from dingo.io import MetaData
+from dingo.io import Data
 from dingo.model.llm.base import BaseLLM
 from dingo.model.modelres import ModelRes
 from dingo.model.prompt.base import BasePrompt
@@ -32,32 +32,33 @@ class BaseLmdeployApiClient(BaseLLM):
             cls.client = APIClient(cls.dynamic_config.api_url)
 
     @classmethod
-    def build_messages(cls, input_data: MetaData) -> List:
-        messages = [{"role": "user",
-                     "content": cls.prompt.content + input_data.content}]
+    def build_messages(cls, input_data: Data) -> List:
+        messages = [
+            {"role": "user", "content": cls.prompt.content + input_data.content}
+        ]
         return messages
 
     @classmethod
     def send_messages(cls, messages: List):
         model_name = cls.client.available_models[0]
         for item in cls.client.chat_completions_v1(model=model_name, messages=messages):
-            response = item['choices'][0]['message']['content']
+            response = item["choices"][0]["message"]["content"]
         return str(response)
 
     @classmethod
     def process_response(cls, response: str) -> ModelRes:
         log.info(response)
 
-        if response.startswith('```json'):
+        if response.startswith("```json"):
             response = response[7:]
-        if response.startswith('```'):
+        if response.startswith("```"):
             response = response[3:]
-        if response.endswith('```'):
+        if response.endswith("```"):
             response = response[:-3]
         try:
             response_json = json.loads(response)
         except json.JSONDecodeError:
-            raise ConvertJsonError(f'Convert to JSON format failed: {response}')
+            raise ConvertJsonError(f"Convert to JSON format failed: {response}")
 
         response_model = ResponseScoreReason(**response_json)
 
@@ -74,14 +75,14 @@ class BaseLmdeployApiClient(BaseLLM):
         return result
 
     @classmethod
-    def call_api(cls, input_data: MetaData) -> ModelRes:
+    def eval(cls, input_data: Data) -> ModelRes:
         if cls.client is None:
             cls.create_client()
 
         messages = cls.build_messages(input_data)
 
         attempts = 0
-        except_msg = ''
+        except_msg = ""
         except_name = Exception.__class__.__name__
         while attempts < 3:
             try:
@@ -98,8 +99,5 @@ class BaseLmdeployApiClient(BaseLLM):
                 except_name = e.__class__.__name__
 
         return ModelRes(
-            error_status=True,
-            type='QUALITY_BAD',
-            name=except_name,
-            reason=[except_msg]
+            error_status=True, type="QUALITY_BAD", name=except_name, reason=[except_msg]
         )

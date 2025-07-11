@@ -3,13 +3,16 @@ import json
 from dingo.model import Model
 from dingo.model.llm.base_openai import BaseOpenAI
 from dingo.model.modelres import ModelRes
+from dingo.model.prompt.prompt_text_quality import PromptTextQualityV2
 from dingo.model.response.response_class import ResponseScoreTypeNameReason
 from dingo.utils import log
 from dingo.utils.exception import ConvertJsonError
 
 
-@Model.llm_register('detect_text_quality_register')
-class DetectTextQualityRegister(BaseOpenAI):
+@Model.llm_register('LlmTextQualityRegister')
+class LlmTextQualityRegister(BaseOpenAI):
+    prompt = PromptTextQualityV2
+
     @classmethod
     def process_response(cls, response: str) -> ModelRes:
         log.debug(response)
@@ -40,6 +43,7 @@ class DetectTextQualityRegister(BaseOpenAI):
 
         return result
 
+
 if __name__ == '__main__':
     from dingo.exec import Executor
     from dingo.io import InputArgs
@@ -52,18 +56,15 @@ if __name__ == '__main__':
         "dataset": "local",
         "data_format": "jsonl",
         "column_content": "content",
-        "custom_config":
-            {
-                "prompt_list": ["PromptTextQualityV2"],
-                "llm_config":
-                    {
-                        "detect_text_quality_register":
-                            {
-                                "key": "",
-                                "api_url": "",
-                            }
-                    }
+        "custom_config": {
+            "prompt_list": ["PromptTextQualityV2"],
+            "llm_config": {
+                "LlmTextQualityRegister": {
+                    "key": "",
+                    "api_url": "",
+                }
             }
+        }
     }
     input_args = InputArgs(**input_data)
     executor = Executor.exec_map["local"](input_args)

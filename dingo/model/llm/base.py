@@ -1,6 +1,6 @@
 from typing import Protocol
 
-from dingo.io import MetaData
+from dingo.io import Data
 from dingo.model.modelres import ModelRes
 from dingo.model.prompt.base import BasePrompt
 
@@ -11,5 +11,5 @@ class BaseLLM(Protocol):
         ...
 
     @classmethod
-    def call_api(cls, input_data: MetaData) -> ModelRes:
+    def eval(cls, input_data: Data) -> ModelRes:
         ...

@@ -4,7 +4,7 @@ from typing import Any, Dict, Generator, Optional, Union
 from dingo.data.dataset.base import Dataset
 from dingo.data.datasource import DataSource
 from dingo.data.utils.digit import compute_pandas_digest
-from dingo.io import MetaData
+from dingo.io import Data
 from dingo.utils import log
 
 
@@ -19,10 +19,10 @@ class SparkDataset(Dataset):
         return None
 
     def __init__(
-            self,
-            source: DataSource,
-            name: Optional[str] = None,
-            digest: Optional[str] = None,
+        self,
+        source: DataSource,
+        name: Optional[str] = None,
+        digest: Optional[str] = None,
     ):
         """
         Args:
@@ -34,8 +34,11 @@ class SparkDataset(Dataset):
         """
         self._ds = source.load()
         self._targets = "text"
-        if source.get_source_type() == "hugging_face" and source.input_args.data_format == "plaintext":
-            if source.input_args.column_content != '':
+        if (
+            source.get_source_type() == "hugging_face"
+            and source.input_args.data_format == "plaintext"
+        ):
+            if source.input_args.column_content != "":
                 self._targets = source.input_args.column_content
             if self._targets is not None and self._targets not in self._ds.column_names:
                 raise RuntimeError(
@@ -53,14 +56,19 @@ class SparkDataset(Dataset):
         Computes a digest for the dataset. Called if the user doesn't supply
         a digest when constructing the dataset.
         """
-        if self.source.get_source_type() == "local" or self.source.get_source_type() == "s3":
+        if (
+            self.source.get_source_type() == "local"
+            or self.source.get_source_type() == "s3"
+        ):
             return str(hash(json.dumps(self.source.to_dict())))[:8]
         elif self.source.get_source_type() == "hugging_face":
             df = next(self._ds.to_pandas(batch_size=10000, batched=True))  # noqa
             return compute_pandas_digest(df)
         elif self.source.get_source_type() == "spark":
             raise NotImplementedError("Spark dataset is not yet implemented.")
-        raise RuntimeError("Spark Datasource must in ['local', 'hugging_face', 'spark', 's3]")
+        raise RuntimeError(
+            "Spark Datasource must in ['local', 'hugging_face', 'spark', 's3]"
+        )
 
     def to_dict(self) -> Dict[str, str]:
         """Create config dictionary for the dataset.
@@ -75,16 +83,19 @@ class SparkDataset(Dataset):
         )
         return config
 
-    def get_data(self) -> Generator[MetaData, None, None]:
+    def get_data(self) -> Generator[Data, None, None]:
         """
         Returns the input model for the dataset.
         But convert data in executor.
         """
         for data_raw in self._ds:
-            if self.source.get_source_type() == "hugging_face" and self.input_args.data_format == "plaintext":
+            if (
+                self.source.get_source_type() == "hugging_face"
+                and self.input_args.data_format == "plaintext"
+            ):
                 data_raw = data_raw[self.input_args.column_content]
-            data: Union[Generator[MetaData, None, None], MetaData] = self.converter(data_raw)
-            if not isinstance(data, MetaData):
+            data: Union[Generator[Data, None, None], Data] = self.converter(data_raw)
+            if not isinstance(data, Data):
                 for d in data:
                     try:
                         yield d
